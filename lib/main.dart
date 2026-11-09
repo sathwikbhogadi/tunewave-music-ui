@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 const playlistUrl =
     'https://open.spotify.com/playlist/6UzK2D1usGFK4gAAsbLzP6';
+const green = Color(0xFF1DB954);
+const bg = Color(0xFF121212);
 
 void main() => runApp(const MusicApp());
 
@@ -11,8 +14,18 @@ class Song {
   final String title, artist, lang;
   final int secs;
   const Song(this.title, this.artist, this.lang, this.secs);
-  String get searchUrl => 'https://open.spotify.com/search/'
-      '${Uri.encodeComponent('$title $artist')}';
+
+  String get searchUrl =>
+      'https://open.spotify.com/search/${Uri.encodeComponent('$title $artist')}';
+
+  int get _seed => title.codeUnits.fold(0, (a, b) => a + b);
+  Color get color =>
+      HSLColor.fromAHSL(1, (_seed * 7 % 360).toDouble(), 0.62, 0.36).toColor();
+  Color get color2 =>
+      HSLColor.fromAHSL(1, ((_seed * 7 + 50) % 360).toDouble(), 0.7, 0.22)
+          .toColor();
+  String get imageUrl =>
+      'https://picsum.photos/seed/${Uri.encodeComponent(title)}/300/300';
 }
 
 const songs = <Song>[
@@ -73,11 +86,22 @@ const songs = <Song>[
   Song('Monica', 'Anirudh Ravichander (Coolie)', 'Tamil', 235),
 ];
 
-const langColors = {
-  'Hindi': [Color(0xFFFF7A18), Color(0xFFAF002D)],
-  'English': [Color(0xFF1DB954), Color(0xFF0B5D3B)],
-  'Telugu': [Color(0xFF8E2DE2), Color(0xFF4A00E0)],
-  'Tamil': [Color(0xFF00C6FF), Color(0xFF0072FF)],
+const filters = ['All', 'Hindi', 'English', 'Telugu', 'Tamil', 'Favorites'];
+const playlistNames = {
+  'All': 'Top Hits Mix',
+  'Hindi': 'Hindi Top Hits',
+  'English': 'English Top Hits',
+  'Telugu': 'Telugu Top Hits',
+  'Tamil': 'Tamil Top Hits',
+  'Favorites': 'Liked Songs',
+};
+const tints = {
+  'All': Color(0xFF1E6B45),
+  'Hindi': Color(0xFF9A3412),
+  'English': Color(0xFF166534),
+  'Telugu': Color(0xFF5B21B6),
+  'Tamil': Color(0xFF0B5CAD),
+  'Favorites': Color(0xFF6D28D9),
 };
 
 class MusicApp extends StatelessWidget {
@@ -87,238 +111,50 @@ class MusicApp extends StatelessWidget {
         title: 'TuneWave',
         debugShowCheckedModeBanner: false,
         theme: ThemeData.dark(useMaterial3: true).copyWith(
-          scaffoldBackgroundColor: const Color(0xFF121212),
-          colorScheme: const ColorScheme.dark(primary: Color(0xFF1DB954)),
+          scaffoldBackgroundColor: Colors.black,
+          colorScheme: const ColorScheme.dark(primary: green),
         ),
-        home: const PlaylistPage(),
+        home: const HomePage(),
       );
 }
 
-class PlaylistPage extends StatefulWidget {
-  const PlaylistPage({super.key});
-  @override
-  State<PlaylistPage> createState() => _PlaylistPageState();
-}
-
-class _PlaylistPageState extends State<PlaylistPage> {
-  String filter = 'All';
-  String query = '';
-  Song? current;
-  bool playing = false;
-  int elapsed = 0;
-  final Set<Song> favs = {};
-  Timer? timer;
-
-  final filters = const [
-    'All', 'Hindi', 'English', 'Telugu', 'Tamil', 'Favorites'
-  ];
-
-  List<Song> get visible => songs.where((s) {
-        final okFilter = filter == 'All' ||
-            (filter == 'Favorites' ? favs.contains(s) : s.lang == filter);
-        final q = query.toLowerCase();
-        final okQuery = q.isEmpty ||
-            s.title.toLowerCase().contains(q) ||
-            s.artist.toLowerCase().contains(q);
-        return okFilter && okQuery;
-      }).toList();
-
-  void play(Song s) {
-    timer?.cancel();
-    setState(() {
-      current = s;
-      elapsed = 0;
-      playing = true;
-    });
-    timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted || !playing || current == null) return;
-      if (elapsed >= current!.secs) {
-        step(1);
-      } else {
-        setState(() => elapsed++);
-      }
-    });
-  }
-
-  void step(int d) {
-    final list = visible;
-    if (list.isEmpty) return;
-    final i = current == null ? -1 : list.indexOf(current!);
-    play(list[(i + d + list.length) % list.length]);
-  }
-
-  void toggle() {
-    if (current == null) return;
-    setState(() => playing = !playing);
-  }
-
-  String fmt(int s) => '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
-
-  Future<void> open(String url) =>
-      launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+class Cover extends StatelessWidget {
+  final Song song;
+  final double size;
+  final double radius;
+  const Cover(this.song, {super.key, this.size = 48, this.radius = 6});
 
   @override
-  void dispose() {
-    timer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final list = visible;
-    return Scaffold(
-      body: SafeArea(
-        child: Column(children: [
-          _header(),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: TextField(
-              onChanged: (v) => setState(() => query = v),
-              decoration: InputDecoration(
-                hintText: 'Search songs or artists',
-                prefixIcon: const Icon(Icons.search),
-                filled: true,
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(30),
-                    borderSide: BorderSide.none),
+  Widget build(BuildContext context) => ClipRRect(
+        borderRadius: BorderRadius.circular(radius),
+        child: SizedBox(
+          width: size,
+          height: size,
+          child: Stack(fit: StackFit.expand, children: [
+            DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [song.color, song.color2]),
               ),
+              child: Center(
+                  child: Icon(Icons.music_note,
+                      color: Colors.white24, size: size * 0.45)),
             ),
-          ),
-          SizedBox(
-            height: 56,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              children: filters
-                  .map((f) => Padding(
-                        padding: const EdgeInsets.all(6),
-                        child: ChoiceChip(
-                          label: Text(f),
-                          selected: filter == f,
-                          onSelected: (_) => setState(() => filter = f),
-                        ),
-                      ))
-                  .toList(),
+            Image.network(
+              song.imageUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+              loadingBuilder: (_, child, p) =>
+                  p == null ? child : const SizedBox.shrink(),
             ),
-          ),
-          Expanded(
-            child: list.isEmpty
-                ? const Center(child: Text('No songs found'))
-                : ListView.builder(
-                    itemCount: list.length,
-                    itemBuilder: (_, i) => _tile(list[i]),
-                  ),
-          ),
-          if (current != null) _player(),
-        ]),
-      ),
-    );
-  }
-
-  Widget _header() => Container(
-        width: double.infinity,
-        margin: const EdgeInsets.all(16),
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
-          gradient: const LinearGradient(
-              colors: [Color(0xFF1DB954), Color(0xFF191414)]),
+          ]),
         ),
-        child: Row(children: [
-          const Icon(Icons.queue_music, size: 56),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('TuneWave',
-                      style:
-                          TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-                  Text('${songs.length} songs · Hindi · English · Telugu · Tamil',
-                      style: const TextStyle(color: Colors.white70)),
-                ]),
-          ),
-          TextButton.icon(
-            onPressed: () => open(playlistUrl),
-            icon: const Icon(Icons.open_in_new, size: 16),
-            label: const Text('Spotify'),
-          ),
-        ]),
       );
-
-  Widget _tile(Song s) {
-    final isCur = s == current;
-    final colors = langColors[s.lang]!;
-    return ListTile(
-      selected: isCur,
-      leading: Container(
-        width: 48,
-        height: 48,
-        decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            gradient: LinearGradient(colors: colors)),
-        child: Icon(isCur && playing ? Icons.graphic_eq : Icons.music_note),
-      ),
-      title: Text(s.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text('${s.artist} · ${s.lang}',
-          maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-        IconButton(
-          icon: Icon(favs.contains(s) ? Icons.favorite : Icons.favorite_border,
-              color: favs.contains(s) ? Colors.redAccent : null),
-          onPressed: () => setState(
-              () => favs.contains(s) ? favs.remove(s) : favs.add(s)),
-        ),
-        Text(fmt(s.secs), style: const TextStyle(color: Colors.white54)),
-      ]),
-      onTap: () => play(s),
-    );
-  }
-
-  Widget _player() {
-    final s = current!;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-      color: const Color(0xFF1E1E1E),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Row(children: [
-          Expanded(
-            child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(s.title,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                      overflow: TextOverflow.ellipsis),
-                  Text(s.artist,
-                      style: const TextStyle(color: Colors.white60),
-                      overflow: TextOverflow.ellipsis),
-                ]),
-          ),
-          IconButton(
-              icon: const Icon(Icons.skip_previous), onPressed: () => step(-1)),
-          IconButton(
-            iconSize: 40,
-            icon: Icon(playing ? Icons.pause_circle : Icons.play_circle),
-            onPressed: toggle,
-          ),
-          IconButton(icon: const Icon(Icons.skip_next), onPressed: () => step(1)),
-          IconButton(
-              tooltip: 'Open in Spotify',
-              icon: const Icon(Icons.open_in_new),
-              onPressed: () => open(s.searchUrl)),
-        ]),
-        Row(children: [
-          Text(fmt(elapsed), style: const TextStyle(fontSize: 12)),
-          Expanded(
-            child: Slider(
-              value: elapsed.clamp(0, s.secs).toDouble(),
-              max: s.secs.toDouble(),
-              onChanged: (v) => setState(() => elapsed = v.toInt()),
-            ),
-          ),
-          Text(fmt(s.secs), style: const TextStyle(fontSize: 12)),
-        ]),
-      ]),
-    );
-  }
 }
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+  @override
+  State<HomePage>
