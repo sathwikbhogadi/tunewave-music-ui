@@ -1,5 +1,9 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:convert';
+// Browser-only imports for the Flutter web application.
+import 'dart:html' as html;
+import 'dart:js' as js;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -23,8 +27,6 @@ class Song {
   Color get color2 =>
       HSLColor.fromAHSL(1, ((_seed * 7 + 50) % 360).toDouble(), 0.7, 0.22)
           .toColor();
-  String get imageUrl =>
-      'https://picsum.photos/seed/${Uri.encodeComponent(title)}/300/300';
 }
 const songs = <Song>[
   // Hindi
@@ -194,11 +196,202 @@ class MusicApp extends StatelessWidget {
         home: const HomePage(),
       );
 }
-class Cover extends StatelessWidget {
+
+
+// Album metadata is resolved once per artist, shared by every Cover widget.
+// JSONP is used because this is a static web app without an API server.
+class AlbumArtwork {
+  final String title, artist, image, storeUrl;
+  const AlbumArtwork(this.title, this.artist, this.image, this.storeUrl);
+  factory AlbumArtwork.fromJson(Map<String, dynamic> value) => AlbumArtwork(
+    value['trackName'] as String? ?? '',
+    value['artistName'] as String? ?? '',
+    value['artworkUrl100'] as String? ?? '',
+    value['trackViewUrl'] as String? ?? '',
+  );
+  Map<String, String> toJson() => {
+    'trackName': title, 'artistName': artist,
+    'artworkUrl100': image, 'trackViewUrl': storeUrl,
+  };
+}
+
+class AlbumArtService {
+  static final Map<String, Future<List<AlbumArtwork>>> _batches = {};
+  static Future<void> _queue = Future<void>.value();
+  static DateTime? _lastRequest;
+  static int _sequence = 0;
+
+  static String _normal(String text) => text.toLowerCase()
+    .replaceAll('é', 'e').replaceAll('É', 'e')
+    .replaceAll(RegExp('[^a-z0-9 ]'), ' ')
+    .replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  static Future<AlbumArtwork?> resolve(Song song) async {
+    final artist = song.artist.split(',').first
+      .replaceAll(RegExp(r'\s*\(.*$'), '').trim();
+    // These catalogue entries identify the film rather than the singer.
+    const filmCredits = {'Guntur Kaaram', 'Pushpa 2'};
+    final term = filmCredits.contains(artist) ? song.title : artist;
+    final country = song.lang == 'English' ? 'US' : 'IN';
+    final key = '$country|${_normal(term)}';
+    final results = await (_batches[key] ??= _load(term, country, key));
+    final target = _normal(song.title);
+    final artistWords = _normal(artist).split(' ')
+      .where((word) => word.length > 2).toSet();
+    AlbumArtwork? best;
+    var bestScore = -1;
+    for (final result in results) {
+      final title = _normal(result.title);
+      final titleMatches = title == target || title.startsWith('$target from ') ||
+        title.startsWith('$target original ');
+      final creditedArtist = _normal(result.artist).split(' ').toSet();
+      final artistMatches = artistWords.intersection(creditedArtist).isNotEmpty;
+      if (!titleMatches || (!artistMatches && !filmCredits.contains(artist))) continue;
+      final imageUri = Uri.tryParse(result.image);
+      final storeUri = Uri.tryParse(result.storeUrl);
+      if (imageUri == null || imageUri.scheme != 'https' ||
+          !imageUri.host.endsWith('.mzstatic.com') || storeUri == null ||
+          storeUri.scheme != 'https' ||
+          !(storeUri.host == 'music.apple.com' || storeUri.host == 'itunes.apple.com')) continue;
+      final score = (title == target ? 10 : 5) + (artistMatches ? 3 : 0);
+      if (score > bestScore) { best = result; bestScore = score; }
+    }
+    return best;
+  }
+
+  static Future<List<AlbumArtwork>> _load(String term, String country, String key) {
+    final cacheKey = 'tunewave_album_art_v1_$key';
+    try {
+      final cached = html.window.localStorage[cacheKey];
+      if (cached != null) {
+        final value = jsonDecode(cached) as Map<String, dynamic>;
+        final saved = DateTime.fromMillisecondsSinceEpoch(value['saved'] as int);
+        if (DateTime.now().difference(saved).inDays < 14) {
+          return Future.value((value['items'] as List)
+            .map((item) => AlbumArtwork.fromJson(Map<String, dynamic>.from(item as Map)))
+            .toList());
+        }
+      }
+    } catch (_) { /* Storage may be unavailable in private browsing. */ }
+    final done = Completer<List<AlbumArtwork>>();
+    _queue = _queue.then((_) async {
+      try {
+        final last = _lastRequest;
+        if (last != null) {
+          final wait = 3300 - DateTime.now().difference(last).inMilliseconds;
+          if (wait > 0) await Future<void>.delayed(Duration(milliseconds: wait));
+        }
+        _lastRequest = DateTime.now();
+        final items = await _jsonp(term, country);
+        if (items.isNotEmpty) {
+          try {
+            html.window.localStorage[cacheKey] = jsonEncode({
+              'saved': DateTime.now().millisecondsSinceEpoch,
+              'items': items.map((item) => item.toJson()).toList(),
+            });
+          } catch (_) { /* Cached requests in memory still work. */ }
+        }
+        done.complete(items);
+      } catch (_) { done.complete(<AlbumArtwork>[]); }
+    });
+    return done.future;
+  }
+
+  static Future<List<AlbumArtwork>> _jsonp(String term, String country) {
+    final done = Completer<List<AlbumArtwork>>();
+    final callback = 'tunewaveAlbum${_sequence++}';
+    final script = html.ScriptElement();
+    Timer? timeout;
+    StreamSubscription<html.Event>? errors;
+    void finish(List<AlbumArtwork> items) {
+      if (done.isCompleted) return;
+      timeout?.cancel(); errors?.cancel(); script.remove();
+      js.context.deleteProperty(callback);
+      done.complete(items);
+    }
+    js.context[callback] = js.allowInterop((dynamic response) {
+      try {
+        final raw = js.context['JSON'].callMethod('stringify', [response]) as String;
+        final body = jsonDecode(raw) as Map<String, dynamic>;
+        final items = (body['results'] as List)
+          .whereType<Map<String, dynamic>>()
+          .where((item) => item['kind'] == 'song')
+          .map(AlbumArtwork.fromJson).toList();
+        finish(items);
+      } catch (_) { finish(<AlbumArtwork>[]); }
+    });
+    script.src = Uri.https('itunes.apple.com', '/search', {
+      'term': term, 'country': country, 'media': 'music',
+      'entity': 'song', 'limit': '200', 'callback': callback,
+    }).toString();
+    errors = script.onError.listen((_) => finish(<AlbumArtwork>[]));
+    timeout = Timer(const Duration(seconds: 12), () => finish(<AlbumArtwork>[]));
+    final head = html.document.head;
+    if (head == null) { finish(<AlbumArtwork>[]); } else { head.append(script); }
+    return done.future;
+  }
+}
+
+class Cover extends StatefulWidget {
+  final Song song;
+  final double size, radius;
+  const Cover(this.song, {super.key, this.size = 48, this.radius = 10});
+  @override
+  State<Cover> createState() => _CoverState();
+}
+
+class _CoverState extends State<Cover> {
+  late Future<AlbumArtwork?> _art;
+  @override
+  void initState() { super.initState(); _art = AlbumArtService.resolve(widget.song); }
+  @override
+  void didUpdateWidget(Cover oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.song != widget.song) _art = AlbumArtService.resolve(widget.song);
+  }
+  @override
+  Widget build(BuildContext context) {
+    final fallback = VinylArtwork(widget.song, size: widget.size, radius: widget.radius);
+    return SizedBox(width: widget.size, height: widget.size,
+      child: FutureBuilder<AlbumArtwork?>(future: _art, builder: (context, snapshot) {
+        final art = snapshot.data;
+        if (art == null) return fallback;
+        return ClipRRect(borderRadius: BorderRadius.circular(widget.radius),
+          child: Tooltip(message: '${widget.song.title} - view release on Apple Music',
+            child: Material(color: bg, child: InkWell(
+              onTap: () async {
+                try {
+                  await launchUrl(Uri.parse(art.storeUrl), mode: LaunchMode.externalApplication);
+                } catch (_) { /* Artwork links are optional to song navigation. */ }
+              },
+              child: Semantics(button: true,
+                label: 'View ${widget.song.title} on Apple Music',
+                child: Stack(fit: StackFit.expand, children: [
+                  fallback,
+                  Image.network(art.image, fit: BoxFit.cover,
+                    webHtmlElementStrategy: WebHtmlElementStrategy.fallback,
+                    errorBuilder: (_, __, ___) => fallback,
+                    loadingBuilder: (_, child, progress) => progress == null ? child : fallback),
+                  Align(alignment: Alignment.bottomRight,
+                    child: Container(margin: const EdgeInsets.all(3),
+                      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 2),
+                      decoration: BoxDecoration(color: Colors.black87,
+                        borderRadius: BorderRadius.circular(3)),
+                      child: widget.size > 90
+                        ? const Text('Apple Music ↗',
+                            style: TextStyle(color: Colors.white, fontSize: 10))
+                        : const Icon(Icons.apple, size: 12, color: Colors.white))),
+                ])),
+            ))));
+      }));
+  }
+}
+
+class VinylArtwork extends StatelessWidget {
   final Song song;
   final double size;
   final double radius;
-  const Cover(this.song, {super.key, this.size = 48, this.radius = 10});
+  const VinylArtwork(this.song, {super.key, this.size = 48, this.radius = 10});
   @override
   Widget build(BuildContext context) => Semantics(
     label: '${song.title} artwork',
@@ -543,7 +736,7 @@ class _HomePageState extends State<HomePage> {
             duration: fmt(list[i].secs), onTap: () => play(list[i]),
             onLike: () => toggleFav(list[i])),
           const SizedBox(height: 24),
-          const Text('Made for every mood. Built with Flutter.',
+          const Text('Album art: Apple Music. Tap a cover to view the release.\nMade for every mood. Built with Flutter.',
             style: TextStyle(color: Colors.white38, fontSize: 12)),
         ],
       )),
